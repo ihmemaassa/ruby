@@ -1,6 +1,7 @@
 require 'net/http'
 require 'uri'
 require 'io/console'
+require 'json'
 
 # banner created with https://patorjk.com/software/taag/ font 'Big' 
 banner = <<TT 
@@ -21,46 +22,78 @@ banner = <<TT
 TT
 puts banner
 
-print "Provide auth key: " 
-STDOUT.flush
-token = STDIN.noecho(&:gets).chomp
-puts
-puts "Entered auth key: #{token[0..2]}#{'*' * (token.length - 6)}#{token[-3..-1]}"
-token
-puts
+URI_auth = 'https://api.testaustime.fi/auth/login'
+URI_sec = 'https://api.testaustime.fi/auth/securedaccess'
+URI_data = 'https://api.testaustime.fi/users/@me/activity/data'
+@URI_del = 'https://api.testaustime.fi/activity/delete'
 
-uri = URI.parse("https://api.testaustime.fi/users/@me/activity/data")
-request = Net::HTTP::Get.new(uri)
-request["Authorization"] = "Bearer #{token}"
-
-req_options = {
-  use_ssl: uri.scheme == "https",
-}
-
-response = Net::HTTP.start(uri.hostname, uri.port, req_options) do |http|
-  http.request(request)
+def get_credentials
+  print "Provide your username: "
+  @user = gets.chomp
+  print "and password: "
+  @pw = STDIN.noecho(&:gets).chomp
+  puts
+  @creds = JSON.dump({ "username" => @user, "password" => @pw })
 end
 
-source = response.body
-
-lines = source.scan(/\{.*?\}/)
-all_lines = []
-lines.each do |line|
-  all_lines << line
+def make_http_request(url, http_req_type, headers={}, body=nil)
+  uri = URI.parse(url)
+  http = Net::HTTP.new(uri.host, uri.port)
+  http.use_ssl = true
+  request = Net::HTTP.const_get(http_req_type).new(uri)
+  headers.each { |key, value| request[key] = value }
+  request.body = body if body
+  @response = http.request(request)
 end
 
-puts "You have #{all_lines.length} data records" 
-puts
-puts"    Options
-    1 - Delete all
-    2 - Delete selected
-    3 - Save selected
-    4 - Exit"
-puts    
-print "Please select: "
-select = gets.chomp.to_i
+def get_token(type)
+  source = @response.body
+  match = source.match(/[a-zA-Z0-9]{32}/)
+  token = match[0].to_s
+  puts "Your #{type} token: #{token[0..2]}#{'*' * (token.length - 6)}#{token[-3..-1]}"
+  return token
+end
 
-def delete_request(token, lines_to_delete)
+def response_data
+  source = @response.body.force_encoding('UTF-8').downcase #remove .downcase for case sensitive search 1/2
+  lines = source.scan(/\{.*?\}/)
+  @all_lines = []
+  lines.each do |line|
+    @all_lines << line
+  end
+end
+
+def selected_lines(action)
+  print "What do you want to #{action}? "
+  words = gets.chomp.downcase.split(",").map(&:strip) # remove .downcase for case sensitive search 2/2
+  selected_lines = @all_lines.public_send(action == 'save' ? :reject : :select) { |line| words.any? { |word| line.include?(word) } }
+  puts "Deletes #{selected_lines.length} data records"
+  if confirm_deletion
+    delete_request(@token, selected_lines)
+  else
+    puts "Deletion cancelled"
+  end
+end
+
+def timer
+  59-((Time.now.to_i-@req_time.to_i)/60)
+end
+
+def print_menu
+  puts "You have #{@all_lines.length} data records" 
+  puts
+  puts"    Options
+      1 - Delete all
+      2 - Delete selected
+      3 - Save selected
+      4 - Renew security token #{ timer <=0 ? "(expired)" : "(#{timer} min remaining)" }
+      5 - Exit"
+  puts
+  print "Please select: "
+  @select = gets.chomp.to_i
+end
+
+def delete_request(sec_token, lines_to_delete)
   regex = /(?<=\:)(\d{6})(?=\,)/
 
   id_list = []
@@ -70,15 +103,10 @@ def delete_request(token, lines_to_delete)
   end
   
   id_list.each do |id|
-    uri = URI.parse('https://api.testaustime.fi/activity/delete')
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = true
-  
-    request = Net::HTTP::Delete.new(uri.request_uri)
-    request['Authorization'] = "Bearer #{token}"
-    request.body = id[0]
-    response = http.request(request)
-    if response.code == "200"
+    header_del = { "Authorization" => "Bearer #{@sec_token}" }
+    body_del = id[0]
+    make_http_request(@URI_del,'Delete', header_del, body_del)
+    if @response.code == "200"
       puts "Data record deleted."
     else
       puts "Deletion failed."
@@ -87,56 +115,57 @@ def delete_request(token, lines_to_delete)
 end
 
 def confirm_deletion
-  loop do
-    print "Delete data? (y/n): "
-    response = gets.chomp.downcase
-    case response
-    when 'y'
-      return true
-    when 'n'
-      return false
-    else
-      puts "Invalid input. Please enter 'y' or 'n'."
-    end
+  print "Delete data? (y/n): "
+  response = gets.chomp.downcase
+  case response
+  when 'y'
+    return true
+  when 'n'
+    return false
+  else
+    puts "Invalid input. Please enter 'y' or 'n'."
   end
 end
 
-case select
+get_credentials
+
+@header_json = { "Content-Type" => "application/json" }
+@body_creds = @creds
+make_http_request(URI_auth, 'Post', @header_json, @body_creds)
+@auth_token = get_token('authentication')
+
+make_http_request(URI_sec, 'Post', @header_json, @body_creds)
+@sec_token = get_token('security')
+@req_time = Time.now
+
+@header_data = { "Authorization" => "Bearer #{@auth_token}" }
+loop do make_http_request(URI_data,'Get',@header_data)
+
+response_data
+
+print_menu
+
+case @select
 when 1 #delete all
 
-  puts "Deletes #{all_lines.length} data records"
+  puts "Deletes #{@all_lines.length} data records"
   if confirm_deletion
-    delete_request(token, all_lines)
+    delete_request(@sec_token, @all_lines)
   else 
     puts "Deletion cancelled"
   end
 
 when 2 # delete selected
-
-  print "What do you want to delete? "
-  delete_words = gets.chomp.split(",").map(&:strip)
-  selected_lines = all_lines.select { |line| delete_words.any? { |word| line.include?(word) } }
-  puts "Deletes #{selected_lines.length} data records"
-  if confirm_deletion
-    delete_request(token, selected_lines)
-  else
-    puts "Deletion cancelled"
-  end
-
+  selected_lines('delete')
 when 3 # save selected
-
-  print "What do you want to save? "
-  save_words = gets.chomp.split(",").map(&:strip)
-  selected_lines = all_lines.reject { |line| save_words.any? { |word| line.include?(word) } }
-  puts "Deletes #{selected_lines.length} data records"
-  if confirm_deletion
-    delete_request(token, selected_lines)
-  else
-    puts "Deletion cancelled"
-  end  
-
-when 4 # exit
-
+  selected_lines('save')
+when 4 # renew sec token
+  make_http_request(URI_sec, 'Post', @header_json, @body_creds)
+  @sec_token = get_token('security')  
+  @req_time = Time.now
+when 5 #exit
+  break
 else
   puts "Not a valid option." 
+end
 end

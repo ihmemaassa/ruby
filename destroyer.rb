@@ -34,6 +34,7 @@ def get_credentials
   @pw = STDIN.noecho(&:gets).chomp
   puts
   @creds = JSON.dump({ "username" => @user, "password" => @pw })
+  puts
 end
 
 def make_http_request(url, http_req_type, headers={}, body=nil)
@@ -44,6 +45,9 @@ def make_http_request(url, http_req_type, headers={}, body=nil)
   headers.each { |key, value| request[key] = value }
   request.body = body if body
   @response = http.request(request)
+  if @response.code != "200"
+    abort("Something went wrong, try again")
+  end
 end
 
 def get_token(type)
@@ -80,6 +84,7 @@ def timer
 end
 
 def print_menu
+  puts
   puts "You have #{@all_lines.length} data records" 
   puts
   puts"    Options
@@ -94,7 +99,7 @@ def print_menu
 end
 
 def delete_request(sec_token, lines_to_delete)
-  regex = /(?<=\:)(\d{6})(?=\,)/
+  regex = /(?<=\"id":)(\d*)(?=\,)/
 
   id_list = []
   lines_to_delete.each do |line|
